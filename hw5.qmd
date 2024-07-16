@@ -1,0 +1,181 @@
+---
+title: "Homework 5"
+author: "James Poslusny"
+format: html
+editor: visual
+---
+
+## Task 1: Conceptual Questions
+
+1.  Using cross validation helps verify that the random forest model actually fits the data in a meaningful way. It's possible to create a random forest model which fits the test data set very well, but isn't particularly helpful when it comes to the population as a whole. Cross validation which catch such issues.
+2.  The bagged tree algorithm helps to reduce the variance of the decision tree estimators by averaging the prediction of some *B* number of trees, from *B* bootstrapped data sets for training.
+3.  A general linear model (or glm) in R is simply any model which relies somewhat on the basis of linear regression, even if the model itself is non-linear.
+4.  The interaction term allows the model to determine the effect of the presence of two predictors at once which it would otherwise be unable to detect from the presence of the two predictors separately. It also is then able to return a better interpretation of the effect of each individual predictor than otherwise.
+5.  Splitting a data set into test and training data sets is for model validation. Some model types, such as decision tree and random forest models, will sometimes over fit a data set, so the test data set ensures that the model still performs well even on data from the same population that it was not trained on.
+
+## Task 2: Fitting Models
+
+Let's go ahead and get out data
+
+```{r}
+heart<- read.csv(url("https://www4.stat.ncsu.edu/~online/datasets/heart.csv"))
+head(heart)
+```
+
+### Quick EDA/ Data Preparation
+
+1.  We're going to check on missing data and summarize the data, especially with respect to the relationships of variables to the response: HeartDisease
+
+    ```{r}
+    #Do we have any missing response? 
+    sum(is.na(heart$HeartDisease)==T) #No. 
+
+    #Is anything missing at all? 
+    sum(is.na(heart)==T) #No. 
+
+    #Let's look at heart disease by age and sex
+    library(ggplot2)
+    ggplot(data = heart, aes(y = as.factor(HeartDisease), color = as.factor(Age))) +geom_bar()
+    ggplot(data = heart, aes(y = as.factor(HeartDisease), color = as.factor(Sex))) +geom_bar()
+    ```
+
+2.  Need to change the HeartDisease variable to a factor and remove the ST_Slope variable.
+
+    ```{r}
+    library(dplyr)
+    heart<- heart %>% mutate(HeartDisease = as.factor(HeartDisease)) %>% 
+      select(-ST_Slope)
+    ```
+
+3.  In preparation for kNN, we're going to use dummy numeric variables for Sex, Chest Pain Type, Exercise Angina, and Resting ECG.
+
+    ```{r}
+    library(caret) #We'll need this library for it.
+    #I'm going to do it this way
+    heart<- heart %>% mutate(Sex = as.factor(Sex)) %>%
+      mutate(ChestPainType = as.factor(ChestPainType)) %>%
+      mutate(ExerciseAngina = as.factor(ExerciseAngina)) %>%
+      mutate(RestingECG = as.factor(RestingECG))
+    ```
+
+### kNN
+
+```{r}
+#First, we need to split the data into pieces, for test and train. 
+set.seed(1701) #To boldy go where no seed has gone before
+fortrain<- createDataPartition(y = heart$HeartDisease, p = 0.66, list = F)
+htrain<- heart[fortrain,]
+htest<- heart[-fortrain,]
+
+#Now we get to specify the CV parameters. 10 folds. 3 repeats. 
+control<- trainControl(method = "repeatedCV", number = 10, repeats = 3)
+
+#And now we train the model. 
+set.seed(1701) #A garden can never have too many seeds. Unless it's mint. 
+heart_knn<- train(HeartDisease~., data = htrain, method = "knn",
+                            trControl = control,
+                            preProcess = c("center", "scale"),
+                            tuneLength = 40)
+
+#Now we get to see how well it did
+htest_pred<- predict(heart_knn, newdata = htest)
+confusionMatrix(htest_pred, htest$HeartDisease)
+```
+
+### Logistic Regression
+
+Let's see if we can create a better fitting GLM model
+
+```{r}
+
+#So glm doesn't have a neat way to do CV so here goes
+#Randomly shuffle the data
+set.seed(1701)
+heart<-heart[sample(nrow(heart)),]
+
+#Create 10 equally size folds
+folds <- cut(seq(1,nrow(heart)),breaks=10,labels=FALSE)
+
+#Perform 10 fold cross validation
+for(i in 1:10){
+    #Segement data by fold using the which() function 
+    testIndexes <- which(folds==i,arr.ind=TRUE)
+    htrain_glm <- heart[testIndexes, ]
+    htest_glm <- heart[-testIndexes, ]
+}
+
+#Going for a binomial family to start with since heart disease is binomial
+set.seed(1701)
+heart_glm1<- glm(HeartDisease~., data = htrain_glm, family = "binomial")
+summary(heart_glm1)
+
+#This should be terrible
+heart_glm2<- glm(HeartDisease~log(Age)+Sex+Sex*log(Age), data = htrain_glm, family = "binomial")
+summary(heart_glm2) #Not as bad as I thought though
+
+#Let's try this
+heart_glm3<- glm(HeartDisease~log(Age)+Sex+log(Cholesterol+1)+log(Cholesterol+1)*log(Age), data = htrain_glm, family = "binomial")
+
+summary(heart_glm3)
+
+#Okay, the first one did best based on AIC so
+
+heart_glm_predict<- predict.glm(heart_glm1, newdata = htest_glm) #This gives log odds and I need 0s and 1
+
+heart_glm_pred_prob<- exp(heart_glm_predict)/(1+exp(heart_glm_predict))
+
+confusionMatrix(as.factor(round(heart_glm_pred_prob)), as.factor(htest_glm$HeartDisease)) #Close but not the winner
+```
+
+### Tree Models (Ents with Stats degrees???) 
+
+We're going to use repeated 10 fold CV to get a classification tree model, random forest, and boosted tree.
+
+-   Classification tree model
+
+    ```{r}
+    heart_classtree<- train(HeartDisease~., data = htrain, method = "rpart",
+                                trControl = control,
+                                preProcess = c("center", "scale"),
+                                cp = 0.1)
+    heart_ctpred<- predict(heart_classtree, htest)
+    confusionMatrix(heart_ctpred, htest$HeartDisease) #KNN still winning so far
+    ```
+
+-   Random Forest (If the forest wasn't there yesterday, it's either Ents or Duncan coming for MacBeth)
+
+    ```{r}
+    mtry<- sqrt(ncol(htrain))
+    tunegrid<- expand.grid(.mtry = mtry)
+
+    heart_rf<- train(HeartDisease~., data = htrain, method = "rf",
+                                trControl = control,
+                                preProcess = c("center", "scale"),
+                                tuneGrid = tunegrid)
+    heart_rf_pred<- predict(heart_rf, htest)
+    confusionMatrix(heart_rf_pred,htest$HeartDisease) #Booo it's the best so far
+    ```
+
+-   Boosted tree
+
+    ```{r}
+    library(gbm)
+    tunegrid<- expand.grid(n.trees = c(25,50,100,200),
+                           interaction.depth = c(1,2,3),
+                           shrinkage = 0.1,
+                           n.minobsinnode = 10)
+
+    set.seed(1701)
+    heart_bt<-  train(HeartDisease~., data = htrain, method = "gbm",
+                                trControl = control,
+                                preProcess = c("center", "scale"),
+                                tuneGrid = tunegrid, 
+                                verbose = F)
+
+    heart_bt_pred<- predict(heart_bt, newdata = htest)
+    confusionMatrix(heart_bt_pred, htest$HeartDisease) #WINNER!!!
+    ```
+
+### Wrap Up
+
+With an accuracy of 83.9%, the boosted tree did the best job!!!
